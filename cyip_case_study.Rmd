@@ -435,11 +435,282 @@ summary(model.2)
 
 #### Simplification of elaborate mean model
 ```{r}
-model.2.coefs <- summary(model.2)$coef_table
-signif.coefs <- model.2.coefs[model.2.coefs[, 'p-value'] < 0.05, ]
-
 # TODO: Write little blurb about complications of stepwise for mixed effects models
+# TODO: Try doing a grid of AIC for optimal params?
 
+model.2.coefs <- summary(model.2)$coef_table
+signif.coefs <- model.2.coefs[model.2.coefs[, "p-value"] < 0.05, ]
+signif.coefs
 
+final.glmm <- mixed_model(
+  Severity ~ Visit +
+    Period +
+    Visit:SNP +
+    Period:SNP,
+  random = ~ Visit | id,
+  data = DF,
+  family = "binomial",
+  control = list(nAGQ = 15)
+)
+# Validation that final.glmm is indeed more performant than elaborate model.2
+anova(final.glmm, model.2)
+# H_0 = coefficients for sex, SNP, scaled_age, visit * period, visit * sex,
+# visit * scaled_age, period * sex, period * age, sex * SNP, sex * age, SNP * age
+# are all 0
+# H_A = at least one of the above is != 0
+# Result is a p-value 0.3971, so cannot reject H_0, and so final.glmm is indeed
+# more performant with an AIC of 1767 vs the elaborate model with an AIC of 1780
 
+# TODO: Parameter interpretation for final_model with just signif.coefs
+summary(final.glmm)
+log_or_coefficients <- summary(final.glmm)$coef_table[, "Estimate"]
+or_coefficients <- exp(log_or_coefficients)
+
+# TODO: Interpret CI/se for the coefficients
+raw_coeff_ci <- confint(final.glmm)
+or_coeff_ci <- exp(raw_coeff_ci)
+
+# Marginal coefficients and their errors
+# TODO: Interpret marginal coeffs/SEs
+marginal_coeff <- marginal_coefs(final.glmm, std_errors = T)
+raw_marginal_coeff_ci <- confint(marginal_coeff)
+or_marginal_coeff_ci <- exp(raw_marginal_coeff_ci)
+```
+
+#### Model diagnostics
+```{r model_diag_q_stability}
+final.glmm4 <- update(final.glmm, nAGQ = 4)
+final.glmm5 <- update(final.glmm, nAGQ = 5)
+final.glmm10 <- update(final.glmm, nAGQ = 10)
+final.glmm20 <- update(final.glmm, nAGQ = 20)
+
+models <- list(
+  "nAGQ=4" = final.glmm4, "nAGQ=5" = final.glmm5,
+  "nAGQ=10" = final.glmm10, "nAGQ=15" = final.glmm,
+  "nAGQ=20" = final.glmm20
+)
+
+extract <- function(obj) {
+  return(c(fixef(obj), "var_(Intercept)" = obj$D[1, 1], "logLik" = logLik(obj)))
+}
+
+nagq_q_stability <- data.frame(sapply(models, extract))
+knitr::kable(nagq_q_stability,
+  caption = "Parameter and Loglikelihood Stability for Different $Q$ Values"
+)
+```
+
+Running `mixed_model` for a value of $Q<4$ on this dataset encounters computational issues as the resulting covariance matrix is not positive definite. As such, only values of $Q>=4$ will be considered for assessing the stability of coefficients and the likelihood of the model.
+
+```{r model_diag_random_effect_normality, fig.width=8}
+final_random_effects <- data.frame(ranef(final.glmm))
+
+rand_int_plot <- ggplot(
+  data = final_random_effects,
+  mapping = aes(x = X.Intercept.)
+) +
+  geom_histogram(aes(y = ..density..),
+    color = "black",
+    fill = "white",
+    lwd = 0.2,
+    bins = 40
+  ) +
+  geom_density(color = "dodgerblue4", ) +
+  theme_bw() +
+  labs(
+    y = "Density",
+    x = "Empirical Bayes Estimates",
+    title = "EB Estimates of Random Intercepts"
+  )
+
+rand_slope_plot <- ggplot(
+  data = final_random_effects,
+  mapping = aes(x = Visit)
+) +
+  geom_histogram(aes(y = ..density..),
+    color = "black",
+    fill = "white",
+    lwd = 0.2,
+    bins = 40
+  ) +
+  geom_density(color = "dodgerblue4", ) +
+  theme_bw() +
+  labs(
+    y = "Density",
+    x = "Empirical Bayes Estimates",
+    title = "EB Estimates of Random Slopes"
+  )
+
+ggarrange(rand_int_plot, rand_slope_plot, ncol = 2)
+```
+
+Not very normal plots for either, with both skewing slightly to the left. In particular the Random Intercepts have a very long tail to the right, indicating that there are individuals at baseline with a significantly higher probability of severe outcomes to begin with.
+
+```{r model_diag_random_effect_independence, fig.width=5, fig.height=5}
+ggplot(
+  data = final_random_effects,
+  mapping = aes(
+    x = X.Intercept.,
+    y = Visit
+  )
+) +
+  geom_point(color = "dodgerblue4") +
+  labs(
+    x = "Random Intercepts",
+    y = "Random Slopes",
+    title = "Scatterplot of EB Estimates"
+  )
+```
+
+This shows that there is a potential mild correlation between the two random effects, as can be reflected in the $-0.333$ correlation coefficient in the summary of the final model.
+
+#### Visualizing random and fixed effect structures
+```{r glmm_viz_average_conditional_probability}
+data.fitted.mean <- data.frame(
+  id = 1,
+  Visit = 0:7,
+  Period = rep(c(rep("A", 8), rep("B", 8)), 3),
+  SNP = factor(0:2)
+)
+probs <- predict(final.glmm, 
+                 newdata = data.fitted.mean, 
+                 type_pred = "response", 
+                 type = "mean_subject", 
+                 re.form = NA, 
+                 se.fit = TRUE)
+data.fitted.mean$fit <- probs$pred
+data.fitted.mean$fit_se <- probs$se.fit
+
+snp.labs <- c("SNP=0", "SNP=1", "SNP=2")
+names(snp.labs) <- c(0, 1, 2)
+
+period.labs <- c("Period A", "Period B")
+names(period.labs) <- c("A", "B")
+
+ggplot(
+  data = data.fitted.mean,
+  mapping = aes(x = Visit, y = fit)
+) +
+  facet_grid(
+    cols = vars(SNP),
+    rows = vars(Period),
+    labeller = labeller(
+      SNP = snp.labs,
+      Period = period.labs
+    )
+  ) +
+  geom_line(color = "dodgerblue4") +
+  geom_point(color = "dodgerblue4") +
+  theme_bw() +
+  labs(
+    x = "Visit",
+    y = "Probability of Severe Disease",
+    title = "Fitted Probability of Severe Disease for Mean Subject"
+  ) +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r glmm_viz_subj_specific_probability}
+strata_sample <- function(x, n) {
+  return(sample(unique(x$id), n))
+}
+
+# Randomly sample n subjects from Period A for each SNP level,
+# and Period B for each SNP level
+n_sample_per_strata <- 10
+
+period_A_data <- DF |> filter(Period == 'A')
+A_0_data <- strata_sample(period_A_data |> filter(SNP == 0), n_sample_per_strata)
+A_1_data <- strata_sample(period_A_data |> filter(SNP == 1), n_sample_per_strata)
+A_2_data <- strata_sample(period_A_data |> filter(SNP == 2), n_sample_per_strata)
+
+period_B_data <- DF |> filter(Period == 'B')
+B_0_data <- strata_sample(period_B_data |> filter(SNP == 0), n_sample_per_strata)
+B_1_data <- strata_sample(period_B_data |> filter(SNP == 1), n_sample_per_strata)
+B_2_data <- strata_sample(period_B_data |> filter(SNP == 2), n_sample_per_strata)
+
+sampled_ids <- c(A_0_data, A_1_data, A_2_data,
+                 B_0_data, B_1_data, B_2_data)
+data.fitted.ss <- DF |>
+  filter(id %in% sampled_ids)
+probs <- predict(final.glmm, 
+                 newdata = data.fitted.ss, 
+                 type_pred = "response", 
+                 type = "subject_specific",
+                 se.fit = TRUE)
+data.fitted.ss$fit <- probs$pred
+
+snp.labs <- c("SNP=0", "SNP=1", "SNP=2")
+names(snp.labs) <- c(0, 1, 2)
+
+period.labs <- c("Period A", "Period B")
+names(period.labs) <- c("A", "B")
+
+ggplot(
+  data = data.fitted.ss,
+  mapping = aes(x = Visit,
+                y = fit)
+) +
+  facet_grid(
+    cols = vars(SNP),
+    rows = vars(Period),
+    labeller = labeller(
+      SNP = snp.labs,
+      Period = period.labs
+    )
+  ) +
+  geom_line(aes(color=id)) +
+  geom_point(aes(color=id)) +
+  theme_bw() +
+  labs(
+    x = "Visit",
+    y = "Probability of Severe Disease",
+    title = "Subject-Specific Fitted Probability of Severe Disease"
+  ) +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "none")
+```
+
+```{r glmm_viz_marginal_probability}
+data.fitted.marginal <- data.frame(
+  id = 1,
+  Visit = 0:7,
+  Period = rep(c(rep("A", 8), rep("B", 8)), 3),
+  SNP = factor(0:2)
+)
+probs <- predict(final.glmm, 
+                 newdata = data.fitted.mean, 
+                 type_pred = "response", 
+                 type = "marginal", 
+                 re.form = NA, 
+                 se.fit = TRUE)
+data.fitted.marginal$fit <- probs$pred
+
+snp.labs <- c("SNP=0", "SNP=1", "SNP=2")
+names(snp.labs) <- c(0, 1, 2)
+
+period.labs <- c("Period A", "Period B")
+names(period.labs) <- c("A", "B")
+
+ggplot(
+  data = data.fitted.marginal,
+  mapping = aes(x = Visit, y = fit)
+) +
+  facet_grid(
+    cols = vars(SNP),
+    rows = vars(Period),
+    labeller = labeller(
+      SNP = snp.labs,
+      Period = period.labs
+    )
+  ) +
+  geom_line(color = "dodgerblue4") +
+  geom_point(color = "dodgerblue4") +
+  theme_bw() +
+  labs(
+    x = "Visit",
+    y = "Probability of Severe Disease",
+    title = "Marginal Probability of Severe Disease"
+  ) +
+  theme(plot.title = element_text(hjust = 0.5))
 ```
