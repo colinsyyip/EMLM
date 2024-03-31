@@ -13,6 +13,7 @@ library(caret)
 library(ggpubr)
 library(lme4)
 library(GLMMadaptive)
+library(MASS)
 ```
 
 #### Data loading
@@ -25,6 +26,31 @@ resp_var <- DF$Severity
 #### Distribution of severity relative to covariates
 Checking for distribution of severity/bias in severity between groups
 ```{r}
+with(DF, tapply(Severity, list(Visit),
+  mean,
+  na.rm = TRUE
+))
+with(DF, tapply(Severity, list(Visit, sex),
+  mean,
+  na.rm = TRUE
+))
+with(DF, tapply(Severity, list(Visit, SNP),
+  mean,
+  na.rm = TRUE
+))
+with(DF, tapply(Severity, list(Visit),
+  var,
+  na.rm = TRUE
+))
+with(DF, tapply(Severity, list(Visit, sex),
+  var,
+  na.rm = TRUE
+))
+with(DF, tapply(Severity, list(Visit, SNP),
+  var,
+  na.rm = TRUE
+))
+
 bar_width <- 0.7
 
 sex_labs <- c("Male", "Female")
@@ -135,7 +161,7 @@ ggplot(
 ```
 #### Mean structure of severity over visits
 ```{r}
-# Means and std. errors of means over time points
+# Means over time points
 plot_ylim <- ylim(0, 0.55)
 
 sex_grouped_data <- DF |>
@@ -244,7 +270,7 @@ annotate_figure(joined_mean_structure_fig,
 )
 ```
 
-#### Logistic mixed effects model
+### Logistic mixed effects model
 ```{r}
 # Change types of variables to factors
 DF$Severity <- as.factor(DF$Severity)
@@ -259,84 +285,161 @@ DF$scaled_age <- scale(DF$Age)
 
 For `glmer`, Laplace approximation is not usable as it does not behave well with binary data. As such, we will use adaptive Gaussian quadrature where possible instead to approximate the integral $\int f(z)\phi(z)dz\approx\sum_{q=1}^{15}w_qf(z_q), \phi(z)\text{ being the multivariate normal},$ which is the likelihood contribution of each subject.
 
+Approach assumes independent errors.
+
+#### Setting up elaborate mean model and picking a random effects structure
 ```{r}
 # Opting for mixed_model directly, as convergence more likely due to
 # aGQ being more flexible to either high dimensional, or broadly more uneven/
 # extreme likelihood function surfaces --> glmer ran into high eigenvalue ratios
-# for the Hessian for increased interaction terms and/or increasing the number of 
-# random effects. glmer also ran into gradient errors unless a high 
+# for the Hessian for increased interaction terms and/or increasing the number of
+# random effects. glmer also ran into gradient errors unless a high
 # (~1e5) number of iterations was run --> not very computationally efficient
+
+# Check to see if glmer converges
+model.0 <- glmer(
+  Severity ~ Visit * Period +
+    Visit * sex +
+    Visit * SNP +
+    Visit * scaled_age +
+    Period * sex +
+    Period * SNP +
+    Period * scaled_age +
+    sex * SNP +
+    sex * scaled_age +
+    SNP * scaled_age +
+    (1 | id),
+  data = DF,
+  family = "binomial",
+  control = glmerControl(optimizer = "bobyqa"),
+  nAGQ = 15
+)
+
+# A penalized quasi-likelihood model runs into similar issues
+model.pql <- glmmPQL(
+  Severity ~ Visit * Period +
+    Visit * sex +
+    Visit * SNP +
+    Visit * scaled_age +
+    Period * sex +
+    Period * SNP +
+    Period * scaled_age +
+    sex * SNP +
+    sex * scaled_age +
+    SNP * scaled_age,
+  random = ~ 1 | id,
+  family = binomial,
+  data = DF
+)
 
 # Skipping checks with Laplace due to computational issues with binary variables
 
-# Linear coefficients, random intercept
+# Linear coefficients, random intercept, maximal
 model.1 <- mixed_model(
-  Severity ~ Visit * Period + Visit * sex + Visit * SNP +
-    Visit * scaled_age,
-  random = ~1 | id,
+  Severity ~ Visit * Period +
+    Visit * sex +
+    Visit * SNP +
+    Visit * scaled_age +
+    Period * sex +
+    Period * SNP +
+    Period * scaled_age +
+    sex * SNP +
+    sex * scaled_age +
+    SNP * scaled_age,
+  random = ~ 1 | id,
   data = DF,
   family = "binomial",
   control = list(nAGQ = 15)
 )
-summary(model.1)
 
-# Linear coefficients, random intercept, random slope
+# Linear coefficients, random intercept, random slope, maximal
 model.2 <- mixed_model(
-  Severity ~ Visit * Period + Visit * sex + Visit * SNP +
-    Visit * scaled_age,
-  random= ~Visit | id,
+  Severity ~ Visit * Period +
+    Visit * sex +
+    Visit * SNP +
+    Visit * scaled_age +
+    Period * sex +
+    Period * SNP +
+    Period * scaled_age +
+    sex * SNP +
+    sex * scaled_age +
+    SNP * scaled_age,
+  random = ~ Visit | id,
   data = DF,
   family = "binomial",
   control = list(nAGQ = 15)
 )
-summary(model.2)
 
-# Quadratic visit, random intercept only
+# Quadratic visit, random intercept only, maximal
 model.3 <- mixed_model(
   Severity ~ (Visit + I(Visit^2)) * Period +
     (Visit + I(Visit^2)) * sex +
     (Visit + I(Visit^2)) * SNP +
-    (Visit + I(Visit^2)) * scaled_age,
-  random=~1 | id,
+    (Visit + I(Visit^2)) * scaled_age +
+    Period * sex +
+    Period * SNP +
+    Period * scaled_age +
+    sex * SNP +
+    sex * scaled_age +
+    SNP * scaled_age,
+  random = ~ 1 | id,
   data = DF,
   family = "binomial",
   control = list(nAGQ = 15)
 )
-summary(model.3)
 
-# Quadratic visit, random intercept and random slope
+# Quadratic visit, random intercept and random slope, maximal
 model.4 <- mixed_model(
   Severity ~ (Visit + I(Visit^2)) * Period +
     (Visit + I(Visit^2)) * sex +
     (Visit + I(Visit^2)) * SNP +
-    (Visit + I(Visit^2)) * scaled_age,
-  random = ~Visit | id,
+    (Visit + I(Visit^2)) * scaled_age +
+    Period * sex +
+    Period * SNP +
+    Period * scaled_age +
+    sex * SNP +
+    sex * scaled_age +
+    SNP * scaled_age,
+  random = ~ Visit | id,
   data = DF,
   family = "binomial",
   control = list(nAGQ = 15)
 )
-summary(model.4)
 
-if (all(model.1$converged, model.2$converged,
-       model.3$converged, model.4$converged)) {
+if (all(
+  model.1$converged, model.2$converged,
+  model.3$converged, model.4$converged
+)) {
   print("Achieved solution convergence in all models")
 } else {
   print("One of the above models has not converged")
 }
 
-#  Pick a model from the above
+# Linear vs. quadratic to determine the correct fixed effects
+anova(model.1, model.3)
+# H_0: Coefficients for quadratic terms are 0, H_A being that they are != 0
+# p-value >= 0.05, so we do not include quadratic terms and select from the linear models
 
 # Linear comp (rand int vs rand int + rand slope)
-anova(model.1, model.2)
-# Between the linear models, rand int+rand slope is a better approx, pvalue of <0.0001
+random_effects_lrt <- anova(model.1, model.2)$LRT
+0.5 * pchisq(random_effects_lrt, df = 1, lower.tail = FALSE) +
+  0.5 * pchisq(random_effects_lrt, df = 2, lower.tail = FALSE)
 
-# Quadratic comp (rand int vs rand int + rand slope)
-anova(model.3, model.4)
-# Between the quadratic models, rand int+rand slope is a better approx, pvalue of <0.0001
+# Between the linear models, rand int+rand slope (model.2) is signif. better
+# Reject H_0: D=[[\sigma^2_int, 0][0,0]]
+# Take H_A: D=[[\sigma^2_int, \sigma_{int,time}][\sigma_{int,time},\sigma^2_time]]
 
-# TODO: Pick between quadratic and linear (model.2 vs. model.4)
+# Move forward with model.2
+summary(model.2)
+```
 
-# TODO: Do CI math to determine which mean portions to keep
+#### Simplification of elaborate mean model
+```{r}
+model.2.coefs <- summary(model.2)$coef_table
+signif.coefs <- model.2.coefs[model.2.coefs[, 'p-value'] < 0.05, ]
 
-# TODO: Check residuals
+# TODO: Write little blurb about complications of stepwise for mixed effects models
+
+
+
 ```
